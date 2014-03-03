@@ -50,6 +50,12 @@ typedef struct  {
     guint32  reader_id;
     guint32  writer_id;
     guint32  stat_id;
+
+    /* Used for getting repo info */
+    char        repo_id[37];
+    char        store_id[37];
+    int         repo_version;
+    gboolean    success;
 } SeafileRecvfsProcPriv;
 
 #define GET_PRIV(o)  \
@@ -323,20 +329,67 @@ register_async_io (CcnetProcessor *processor)
 
     priv->registered = TRUE;
     priv->reader_id = seaf_obj_store_register_async_read (seaf->fs_mgr->obj_store,
+                                                          priv->store_id,
+                                                          priv->repo_version,
                                                           on_seafdir_read,
                                                           processor);
     priv->stat_id = seaf_obj_store_register_async_stat (seaf->fs_mgr->obj_store,
-                                                          on_seafile_stat,
-                                                          processor);
+                                                        priv->store_id,
+                                                        priv->repo_version,
+                                                        on_seafile_stat,
+                                                        processor);
     priv->writer_id = seaf_obj_store_register_async_write (seaf->fs_mgr->obj_store,
+                                                           priv->store_id,
+                                                           priv->repo_version,
                                                            on_fs_write,
                                                            processor);
+}
+
+static void *
+get_repo_info_thread (void *data)
+{
+    CcnetProcessor *processor = data;
+    USE_PRIV;
+    SeafRepo *repo;
+
+    repo = seaf_repo_manager_get_repo (seaf->repo_mgr, priv->repo_id);
+    if (!repo) {
+        seaf_warning ("Failed to get repo %s.\n", priv->repo_id);
+        priv->success = FALSE;
+        return data;
+    }
+
+    memcpy (priv->store_id, repo->store_id, 36);
+    priv->repo_version = repo->version;
+    priv->success = TRUE;
+
+    seaf_repo_unref (repo);
+    return data;
+}
+
+static void
+get_repo_info_done (void *data)
+{
+    CcnetProcessor *processor = data;
+    USE_PRIV;
+
+    if (priv->success) {
+        ccnet_processor_send_response (processor, SC_OK, SS_OK, NULL, 0);
+        processor->state = RECV_ROOT;
+        priv->dir_queue = g_queue_new ();
+        register_async_io (processor);
+    } else {
+        ccnet_processor_send_response (processor, SC_SHUTDOWN, SS_SHUTDOWN,
+                                       NULL, 0);
+        ccnet_processor_done (processor, FALSE);
+    }
 }
 
 static int
 start (CcnetProcessor *processor, int argc, char **argv)
 {
     char *session_token;
+    char repo_id[37];
     USE_PRIV;
 
     if (argc != 1) {
@@ -350,10 +403,12 @@ start (CcnetProcessor *processor, int argc, char **argv)
                                          NULL,
                                          processor->peer_id,
                                          session_token, NULL) == 0) {
-        ccnet_processor_send_response (processor, SC_OK, SS_OK, NULL, 0);
-        processor->state = RECV_ROOT;
-        priv->dir_queue = g_queue_new ();
-        register_async_io (processor);
+        memcpy (priv->repo_id, repo_id, 36);
+        ccnet_processor_thread_create (processor,
+                                       seaf->job_mgr,
+                                       get_repo_info_thread,
+                                       get_repo_info_done,
+                                       processor);
         return 0;
     } else {
         ccnet_processor_send_response (processor, 

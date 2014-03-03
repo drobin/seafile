@@ -311,7 +311,10 @@ load_blocklist_with_local_history (TransferTask *task)
 
     for (i = 0; i < commits->obj_ids->len; ++i) {
         commit_id = g_ptr_array_index (commits->obj_ids, i);
-        commit = seaf_commit_manager_get_commit (seaf->commit_mgr, commit_id);
+        commit = seaf_commit_manager_get_commit (seaf->commit_mgr,
+                                                 task->repo_id,
+                                                 task->repo_version,
+                                                 commit_id);
         if (!commit) {
             seaf_warning ("Failed to get commit %s.\n", commit_id);
             block_list_free (bl1);
@@ -319,6 +322,8 @@ load_blocklist_with_local_history (TransferTask *task)
         }
 
         if (seaf_fs_manager_populate_blocklist (seaf->fs_mgr,
+                                                task->repo_id,
+                                                task->repo_version,
                                                 commit->root_id,
                                                 bl1) < 0) {
             seaf_commit_unref (commit);
@@ -343,6 +348,8 @@ load_blocklist_with_local_history (TransferTask *task)
     for (p = parents; p; p = p->next) {
         parent_id = p->data;
         parent = seaf_commit_manager_get_commit (seaf->commit_mgr,
+                                                 task->repo_id,
+                                                 task->repo_version,
                                                  parent_id);
         if (!parent) {
             block_list_free (bl1);
@@ -350,7 +357,9 @@ load_blocklist_with_local_history (TransferTask *task)
         }
 
         bl2 = block_list_new ();
-        if (seaf_fs_manager_populate_blocklist (seaf->fs_mgr, 
+        if (seaf_fs_manager_populate_blocklist (seaf->fs_mgr,
+                                                task->repo_id,
+                                                task->repo_version,
                                                 parent->root_id, bl2) < 0) {
             seaf_commit_unref (parent);
             block_list_free (bl1);
@@ -391,6 +400,8 @@ seaf_transfer_task_load_blocklist (TransferTask *task)
         SeafCommit *remote;
 
         remote = seaf_commit_manager_get_commit (seaf->commit_mgr,
+                                                 task->repo_id,
+                                                 task->repo_version,
                                                  task->head);
         if (!remote) {
             seaf_warning ("[tr-mgr] Failed to find commit %s.\n", task->head);
@@ -411,6 +422,8 @@ seaf_transfer_task_load_blocklist (TransferTask *task)
              */
             bl = block_list_new ();
             if (seaf_fs_manager_populate_blocklist (seaf->fs_mgr,
+                                                    task->repo_id,
+                                                    task->repo_version,
                                                     remote->root_id,
                                                     bl) < 0) {
                 seaf_warning ("[tr-mgr] Failed to get blocks of commit %s.\n",
@@ -715,14 +728,6 @@ static void register_processors (CcnetClient *client)
                                            SEAFILE_TYPE_CHECK_TX_V3_PROC);
 
     ccnet_proc_factory_register_processor (client->proc_factory,
-                                           "seafile-getcommit",
-                                           SEAFILE_TYPE_GETCOMMIT_PROC);
-
-    ccnet_proc_factory_register_processor (client->proc_factory,
-                                           "seafile-sendcommit",
-                                           SEAFILE_TYPE_SENDCOMMIT_PROC);
-
-    ccnet_proc_factory_register_processor (client->proc_factory,
                                            "seafile-getblock",
                                            SEAFILE_TYPE_GETBLOCK_PROC);
 
@@ -851,6 +856,7 @@ clean_tasks_for_repo (SeafTransferManager *manager,
 char *
 seaf_transfer_manager_add_download (SeafTransferManager *manager,
                                     const char *repo_id,
+                                    int repo_version,
                                     const char *peer_id,
                                     const char *from_branch,
                                     const char *to_branch,
@@ -874,6 +880,7 @@ seaf_transfer_manager_add_download (SeafTransferManager *manager,
                                    from_branch, to_branch, token,
                                    TASK_TYPE_DOWNLOAD);
     task->state = TASK_STATE_NORMAL;
+    task->repo_version = repo_version;
 
     /* Mark task "clone" if it's a new repo. */
     if (!seaf_repo_manager_repo_exists (seaf->repo_mgr, repo_id))
@@ -889,6 +896,7 @@ seaf_transfer_manager_add_download (SeafTransferManager *manager,
 char *
 seaf_transfer_manager_add_upload (SeafTransferManager *manager,
                                   const char *repo_id,
+                                  int repo_version,
                                   const char *peer_id,
                                   const char *from_branch,
                                   const char *to_branch,
@@ -896,9 +904,16 @@ seaf_transfer_manager_add_upload (SeafTransferManager *manager,
                                   GError **error)
 {
     TransferTask *task;
+    SeafRepo *repo;
 
     if (!repo_id || !from_branch || !to_branch || !token) {
         g_set_error (error, SEAFILE_DOMAIN, SEAF_ERR_BAD_ARGS, "Empty argument(s)");
+        return NULL;
+    }
+
+    repo = seaf_repo_manager_get_repo (seaf->repo_mgr, repo_id);
+    if (!repo) {
+        g_set_error (error, SEAFILE_DOMAIN, SEAF_ERR_BAD_ARGS, "Repo not found");
         return NULL;
     }
 
@@ -912,6 +927,7 @@ seaf_transfer_manager_add_upload (SeafTransferManager *manager,
                                    from_branch, to_branch, token,
                                    TASK_TYPE_UPLOAD);
     task->state = TASK_STATE_NORMAL;
+    task->repo_version = repo_version;
 
     g_hash_table_insert (manager->upload_tasks,
                          g_strdup(task->tx_id),
@@ -1519,6 +1535,8 @@ start_fs_download (TransferTask *task, const char *peer_id)
     if (task->protocol_version == 1) {
         ol = object_list_new ();
         ret = seaf_commit_manager_traverse_commit_tree (seaf->commit_mgr,
+                                                        task->repo_id,
+                                                        task->repo_version,
                                                         task->head,
                                                         fs_root_collector,
                                                         ol, FALSE);
@@ -1678,7 +1696,10 @@ update_local_repo (TransferTask *task)
     SeafCommit *new_head;
     SeafBranch *branch;
 
-    new_head = seaf_commit_manager_get_commit (seaf->commit_mgr, task->head);
+    new_head = seaf_commit_manager_get_commit (seaf->commit_mgr,
+                                               task->repo_id,
+                                               task->repo_version,
+                                               task->head);
     if (!new_head) {
         seaf_warning ("Failed to get commit %s.\n", task->head);
         return -1;
@@ -2026,6 +2047,8 @@ start_fs_upload (TransferTask *task, const char *peer_id)
     if (task->protocol_version == 1) {
         ol = object_list_new ();
         ret = seaf_commit_manager_traverse_commit_tree (seaf->commit_mgr,
+                                                        task->repo_id,
+                                                        task->repo_version,
                                                         task->head,
                                                         fs_root_collector,
                                                         ol, FALSE);

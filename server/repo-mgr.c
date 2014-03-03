@@ -158,6 +158,7 @@ seaf_repo_from_commit (SeafRepo *repo, SeafCommit *commit)
         }
     }
     repo->no_local_history = commit->no_local_history;
+    repo->version = commit->version;
 }
 
 void
@@ -176,6 +177,7 @@ seaf_repo_to_commit (SeafRepo *repo, SeafCommit *commit)
         }
     }
     commit->no_local_history = repo->no_local_history;
+    commit->version = repo->version;
 }
 
 static gboolean
@@ -207,6 +209,8 @@ seaf_repo_get_commits (SeafRepo *repo)
     for (ptr = branches; ptr != NULL; ptr = ptr->next) {
         branch = ptr->data;
         gboolean res = seaf_commit_manager_traverse_commit_tree (seaf->commit_mgr,
+                                                                 repo->id,
+                                                                 repo->version,
                                                                  branch->commit_id,
                                                                  collect_commit,
                                                                  &commits,
@@ -557,8 +561,9 @@ load_repo_commit (SeafRepoManager *manager,
 {
     SeafCommit *commit;
 
-    commit = seaf_commit_manager_get_commit (manager->seaf->commit_mgr,
-                                             branch->commit_id);
+    commit = seaf_commit_manager_get_commit_compatible (manager->seaf->commit_mgr,
+                                                        repo->id,
+                                                        branch->commit_id);
     if (!commit) {
         seaf_warning ("Commit %s is missing\n", branch->commit_id);
         repo->is_corrupted = TRUE;
@@ -604,6 +609,10 @@ load_repo (SeafRepoManager *manager, const char *repo_id, gboolean ret_corrupt)
 
     /* Load virtual repo info if any. */
     repo->virtual_info = seaf_repo_manager_get_virtual_repo_info (manager, repo_id);
+    if (repo->virtual_info)
+        memcpy (repo->store_id, repo->virtual_info->origin_reop_id, 36);
+    else
+        memcpy (repo->store_id, repo->id, 36);
 
     return repo;
 }
@@ -1981,7 +1990,9 @@ get_group_repos_cb (SeafDBRow *row, void *data)
     const char *permission = seaf_db_row_get_column_text (row, 4);
     const char *commit_id = seaf_db_row_get_column_text (row, 5);
 
-    commit = seaf_commit_manager_get_commit (seaf->commit_mgr, commit_id);
+    commit = seaf_commit_manager_get_commit_compatible (seaf->commit_mgr,
+                                                        repo_id,
+                                                        commit_id);
     if (!commit)
         return TRUE;
 
@@ -2159,7 +2170,9 @@ collect_public_repos (SeafDBRow *row, void *data)
     permission = seaf_db_row_get_column_text (row, 3);
     commit_id = seaf_db_row_get_column_text (row, 4);
 
-    commit = seaf_commit_manager_get_commit (seaf->commit_mgr, commit_id);
+    commit = seaf_commit_manager_get_commit_compatible (seaf->commit_mgr,
+                                                        repo_id,
+                                                        commit_id);
     if (!commit)
         return TRUE;
 
